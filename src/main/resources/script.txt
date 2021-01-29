@@ -1,0 +1,40 @@
+curl -H "Content-Type: application/json" -X POST -d '{"path": "pisc/0000.jpg"}' "http://localhost:8050/captcharecognize"
+
+
+//        writeField(buffer, boundary, "shipType", param.getShipType());
+//        writeField(buffer, boundary, "name1", "1");
+//        writeField(buffer, boundary, "name2", "1");
+//        writeField(buffer, boundary, "name3", "1");
+//        writeField(buffer, boundary, "name4", "1");
+//        writeField(buffer, boundary, "name5", "1");
+//
+//        writeField(buffer, boundary, "maximumDraught", param.getDeep());
+//        writeField(buffer, boundary, "totalPeople1", param.getCrewNumber());
+//        writeField(buffer, boundary, "eta", param.getEta());
+//        writeField(buffer, boundary, "startPort", param.getStartHarbor().split("-")[1]);
+//        writeField(buffer, boundary, "beyondBreadth", param.getWidthLeft());
+//        writeField(buffer, boundary, "beyondBreadthRight", param.getWidthRight());
+//        writeField(buffer, boundary, "endPort", param.getDestHarbor().split("-")[1]);
+//        writeField(buffer, boundary, "berthingPosition", param.getPosition());
+//        writeField(buffer, boundary, "goodsType", param.getGoodsType().split("-")[0]);
+//        writeField(buffer, boundary, "goodsName", param.getGoodsType().split("-")[1]);
+//        writeField(buffer, boundary, "totalCargoWeight", param.getTotalWeight());
+//        writeField(buffer, boundary, "remark", param.getRemark());
+//        writeField(buffer, boundary, "saveCode", code);
+//        writeField(buffer, boundary, "vtsStatus", "0");
+
+
+    private void writeField(StringBuffer buffer, String boundary, String key, String value) {
+        buffer.append("--");
+        buffer.append(boundary);
+        buffer.append("\r\n");
+        buffer.append("Content-Disposition: form-data; name=\"").append(key).append("\"\r\n\r\n");
+        buffer.append(value);
+        buffer.append("\r\n");
+    }
+
+    private void writeEnd(StringBuffer buffer, String boundary) {
+        buffer.append("--");
+        buffer.append(boundary);
+        buffer.append("--");
+    }
