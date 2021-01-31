@@ -1,21 +1,15 @@
 package com.jzq.http.qd;
 
+import java.util.List;
+
 public class TaskConfig {
-    private String cookie;
+    private List<String> cookie;
 
-
-    public String getCookie() {
+    public List<String> getCookie() {
         return cookie;
     }
 
-    public void setCookie(String cookie) {
+    public void setCookie(List<String> cookie) {
         this.cookie = cookie;
-    }
-
-    @Override
-    public String toString() {
-        return "TaskConfig{" +
-                "cookie='" + cookie + '\'' +
-                '}';
     }
 }

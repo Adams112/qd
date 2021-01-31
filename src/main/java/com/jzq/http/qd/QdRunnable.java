@@ -9,7 +9,6 @@ import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.entity.ContentType;
-import org.apache.http.entity.HttpEntityWrapper;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.entity.mime.HttpMultipartMode;
 import org.apache.http.entity.mime.MultipartEntityBuilder;
@@ -21,29 +20,56 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 public class QdRunnable implements Runnable {
     private static final Logger logger = LoggerFactory.getLogger(QdRunnable.class);
 
     private static final int MAX_RETRY_COUNT = 5;
     private int retry = 0;
-    private String code = null;
+    private final List<String> codes = new ArrayList<>();
+    private boolean codesGot = false;
+    private final List<String> cookies;
     private final QdTask qdTask;
+    private final ThreadPoolExecutor executor;
 
     private final AtomicInteger picIndex = new AtomicInteger(0);
     private final String tempFilePrefix;
-    private String tempFileName;
-
     private final HttpClient client = HttpClients.createDefault();
 
-    private volatile long timeRemainMillis = Long.MAX_VALUE;
-    private volatile long getTimeRemainMillisTimestamp = 0;
-    private static final long stopGetRemainTimeThresholdMillis = 50;
+    // 预估服务器时间相关，只有一个线程会预估时间
+    private static int threadCount = 0;
+    private static final Object lock = new Object();
+    private static int estimateTimeRetry = 0;
+    private volatile static boolean estimated = false;
+    private volatile static boolean runBySelf = false;
+    private volatile static int taskId = -1;
+    private volatile static long estimatedLow = Long.MAX_VALUE;
+    private volatile static long estimatedHigh = Long.MAX_VALUE;
+    private static final List<String> allCookies = new ArrayList<>();
+    private static final List<TimeEstimationNode> nodes = new ArrayList<>();
+    private static final Object nodeLock = new Object();
+    private static final List<Thread> waitingThreads = new ArrayList<>();
 
-    public QdRunnable(QdTask qdTask) {
+    public QdRunnable(QdTask qdTask, ThreadPoolExecutor executor) {
         this.qdTask = qdTask;
+        this.executor = executor;
+        this.cookies = qdTask.getConfig().getCookie();
+        synchronized (lock) {
+            allCookies.addAll(cookies);
+            threadCount++;
+            if (taskId == -1) {
+                taskId = qdTask.getId();
+            } else {
+                waitingThreads.add(Thread.currentThread());
+            }
+        }
         tempFilePrefix = "/root/temp/pics/" + qdTask.getId() + "/";
         if (!new File(tempFilePrefix).exists()) {
             boolean mkdirs = new File(tempFilePrefix).mkdirs();
@@ -59,53 +85,92 @@ public class QdRunnable implements Runnable {
         boolean interrupted = false;
         try {
             while (!shouldBreak() && !(interrupted = Thread.interrupted())) {
-                long estimatedTimeRemainMillis = 0;
-                try {
-                    estimatedTimeRemainMillis = timeRemainMillis();
-                } catch (IOException e) {
-                    // 时间获取出错，直接重试
-                    logger.error("get time error, {}", e.getMessage(), e);
-                    retry++;
-                    continue;
-                }
-
-                long timeToSleep;
-                if (estimatedTimeRemainMillis > 6000) {
-                    timeToSleep = estimatedTimeRemainMillis - 6000;
-                    logger.info("time remain {}ms, sleep for {}ms, id: {}", estimatedTimeRemainMillis,
-                            timeToSleep, qdTask.getId());
-                    sleep(timeToSleep);
-                    continue;
-                }
-
-                if  (estimatedTimeRemainMillis > stopGetRemainTimeThresholdMillis) {
-                    if (code == null) {
-                        logger.info("time remain {}ms, pre get image and code, id: {}", estimatedTimeRemainMillis,
+                boolean localEstimated = estimated;
+                boolean localRunBySelf = runBySelf;
+                if (localEstimated) {
+                    long timeRemainMillis = estimatedLow - System.currentTimeMillis();
+                    if (timeRemainMillis > 15000) {
+                        logger.info("time remain {}ms, sleep, id: {}", timeRemainMillis,
                                 qdTask.getId());
+                        sleep(timeRemainMillis - 15000);
+                    } else if (timeRemainMillis > 100) {
+                        if(!codesGot) {
+                            preGetCodes(timeRemainMillis);
+                        } else {
+                            sleep(timeRemainMillis - 100);
+                        }
+                    } else {
+                        long low = estimatedLow - 100, high = estimatedHigh + 100;
+                        long span = (high - low) / cookies.size();
+                        runTask(span);
+                        retry++;
+                    }
+                } else if (localRunBySelf) {
+                    long timeRemain;
+                    try {
+                        timeRemain = timeRemain();
+                    } catch (IOException e) {
+                        // 时间获取出错，直接重试
+                        logger.error("get time error, {}", e.getMessage(), e);
+                        retry++;
+                        continue;
+                    }
+
+                    if (timeRemain > 0) {
+                        if(!codesGot) {
+                            preGetCodes(timeRemain * 1000);
+                        } else {
+                            sleep(timeRemain * 1000);
+                            runTask(200);
+                            retry++;
+                        }
+                    } else {
+                        runTask(200);
+                        retry++;
+                    }
+                } else {
+                    long localTaskId = taskId;
+                    if (localTaskId == qdTask.getId()) {
+                        // 线程保证无论如何，都要唤醒其他线程
+                        long timeRemain;
                         try {
-                            long start = System.currentTimeMillis();
-                            getImage();
-                            code = getValidationCode();
-                            long end = System.currentTimeMillis();
-                            estimatedTimeRemainMillis = estimatedTimeRemainMillis - (end - start);
-                        } catch (Exception e) {
-                            logger.error("pre get image and code error, retry, {}, id: {}", e.getMessage(), qdTask.getId());
-                            // 图片预取出错，可重试
+                            timeRemain = timeRemain();
+                        } catch (IOException e) {
+                            // 时间获取出错，直接重试
+                            logger.error("get time error, {}", e.getMessage(), e);
                             retry++;
                             continue;
                         }
-                    }
-                }
 
-                if (estimatedTimeRemainMillis > 2000) {
-                        sleep(estimatedTimeRemainMillis - 2000);
-                } else if (estimatedTimeRemainMillis > stopGetRemainTimeThresholdMillis) {
-                    logger.info("time remain {}ms, sleep for {}ms, id: {}", estimatedTimeRemainMillis,
-                            estimatedTimeRemainMillis, qdTask.getId());
-                    sleep(estimatedTimeRemainMillis);
-                    runTask();
-                } else {
-                    runTask();
+                        long timeToSleep;
+//                        long threshold = 25 * 60;
+                        long threshold = Long.MAX_VALUE - 1;
+                        if (timeRemain > threshold) {
+                            timeToSleep = (timeRemain - threshold) * 1000;
+                            logger.info("time remain {}s, sleep for {}ms, id: {}", timeRemain,
+                                    timeToSleep, qdTask.getId());
+                            sleep(timeToSleep);
+                        } else if (timeRemain < 10 || estimateTimeRetry >= MAX_RETRY_COUNT) {
+                            runBySelf = true;
+                            wakeUpThreads();
+                        } else {
+                            estimateTimeRetry++;
+                            try {
+                                estimateTime();
+                            } catch (Exception e) {
+                                logger.error(e.getMessage(), e);
+                            }
+                            localEstimated = estimated;
+                            if (localEstimated) {
+                                wakeUpThreads();
+                            } else {
+                                sleep(200000L);
+                            }
+                        }
+                    } else {
+                        // 未估计过时间，且不是由自己来估计时间，无期限休眠，等待唤醒
+                        LockSupport.park(this);
+                    }
                 }
             }
         } catch (Exception e) {
@@ -115,63 +180,193 @@ public class QdRunnable implements Runnable {
             if (interrupted) {
                 logger.info("interrupted, exit");
             }
+            if (qdTask.getStatus() != QdStatusEnum.SUCCESS && qdTask.getStatus() != QdStatusEnum.FAILED) {
+                qdTask.setStatus(QdStatusEnum.FAILED);
+            }
             qdTask.setThread(null);
+
+            // 估计时间的线程意外退出，还未估计时间，切换到自己提交任务模式，不依赖估计的时间
+            if (!estimated) {
+                runBySelf = true;
+                wakeUpThreads();
+            }
+
+            // 最后一个推出的线程清理静态变量
+            if (--threadCount == 0) {
+                estimateTimeRetry = 0;
+                estimated = false;
+                runBySelf = false;
+                taskId = -1;
+                estimatedLow = Long.MAX_VALUE;
+                estimatedHigh = Long.MAX_VALUE;
+                allCookies.clear();
+                nodes.clear();
+                waitingThreads.clear();
+            }
+
         }
         logger.info("result: {}, id: {}", qdTask.getStatus(), qdTask.getId());
     }
 
-    private void runTask() {
+    private void preGetCodes(long timeRemainMillis) {
+        logger.info("time remain {}ms, pre get image and code, id: {}", timeRemainMillis,
+                qdTask.getId());
+        try {
+            codes.clear();
+            for (String cookie : cookies) {
+                String image = getImage(cookie);
+                String code = getValidationCode(image);
+                codes.add(code);
+            }
+            codesGot = true;
+        } catch (Exception e) {
+            logger.error("pre get image and code error, retry, {}, id: {}", e.getMessage(), qdTask.getId());
+            // 图片预取出错，可重试
+            retry++;
+        }
+    }
+
+    private void wakeUpThreads() {
+        for (Thread thread : waitingThreads) {
+            LockSupport.unpark(thread);
+        }
+    }
+
+    private void estimateTime() {
+        synchronized (lock) {
+            if (estimated) {
+                return;
+            }
+
+            nodes.clear();
+            List<Future<?>> futures = new ArrayList<>();
+            for (int i = 0; i < 24; i++) {
+                String cookie = allCookies.get(i % allCookies.size());
+                Future<?> future = executor.submit(() -> {
+                    TimeEstimationNode node = new TimeEstimationNode();
+                    node.start = System.currentTimeMillis();
+                    long timeRemain = Long.MAX_VALUE;
+                    try {
+                        timeRemain = timeRemainInternal(cookie);
+                    } catch (Exception ignore) {
+                    }
+                    node.end = System.currentTimeMillis();
+                    if (timeRemain != Long.MAX_VALUE && timeRemain > 0) {
+                        node.time = timeRemain;
+                        synchronized (nodeLock) {
+                            nodes.add(node);
+                        }
+                    }
+                });
+                futures.add(future);
+                sleep(50L);
+            }
+
+            for (Future<?> future : futures) {
+                try {
+                    future.get(5000L, TimeUnit.MILLISECONDS);
+                } catch (Exception ignore) {
+                }
+            }
+
+            for (int i = 0; i < nodes.size() - 1; i++) {
+                for (int j = 1; j < nodes.size(); j++) {
+                    TimeEstimationNode n1 = nodes.get(i);
+                    TimeEstimationNode n2 = nodes.get(j);
+                    if (n2.time - n1.time == 1) {
+                        TimeEstimationNode temp = n1;
+                        n1 = n2;
+                        n2 = temp;
+                    }
+
+                    if (n1.time - n2.time == 1) {
+                        long timeToAdd = n1.time * 1000;
+                        long high = n2.end + timeToAdd, low = n1.start + timeToAdd;
+                        if (estimatedHigh == Long.MAX_VALUE || (estimatedHigh - estimatedLow) > (high - low)) {
+                            estimatedHigh = high;
+                            estimatedLow = low;
+                        }
+                    }
+                }
+            }
+            logger.info("estimated low: {}, high: {}", timestampToDate(estimatedLow), timestampToDate(estimatedHigh));
+            estimated = true;
+        }
+    }
+
+    private String timestampToDate(long timestamp) {
+        return new SimpleDateFormat("yyyyMMdd hh:mm:ss.SSS").format(new Date(timestamp));
+    }
+
+    private void runTask(long span) {
         logger.info("time to start, id: {}", qdTask.getId());
         if (qdTask.getStatus() == QdStatusEnum.NEW) {
             qdTask.setStatus(QdStatusEnum.RUNNING);
             qdTask.setGmtModified(new Date());
         }
 
-        long t1 = 0, t2 = 0, t3 = 0, t4 = 0;
         try {
-            t1 = System.currentTimeMillis();
-            if (code == null) {
-                getImage();
+            if (codesGot) {
+                for (int i = 0; i < cookies.size(); i++) {
+                    String code = codes.get(i);
+                    String cookie = cookies.get(i);
+                    executor.execute(() -> {
+                        long t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+                        try {
+                            t3 = System.currentTimeMillis();
+                            submit(code, cookie);
+                            t4 = System.currentTimeMillis();
+                        } catch (IOException e) {
+                            logger.error("execute error", e);
+                        } finally {
+                            logger.info("getImageTime: {}, getValidationCodeTime: {}, submitTime: {}, success: {}, id: {}"
+                                    , (t2 - t1), (t3 - t2), (t4 - t3), qdTask.getStatus(), qdTask.getId());
+                        }
+                    });
+                    sleep(span);
+                }
+                codesGot = false;
+            } else {
+                for (int i = 0; i < cookies.size(); i++) {
+                    if (qdTask.getStatus() == QdStatusEnum.FAILED || qdTask.getStatus() == QdStatusEnum.SUCCESS) {
+                        break;
+                    }
+                    final int index = i;
+                    executor.execute(() -> {
+                        long t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+                        try {
+                            t1 = System.currentTimeMillis();
+                            String image = getImage(cookies.get(index));
+                            t2 = System.currentTimeMillis();
+                            String code = getValidationCode(image);
+                            t3 = System.currentTimeMillis();
+                            submit(code, cookies.get(index));
+                            t4 = System.currentTimeMillis();
+                        } catch (IOException e) {
+                            logger.error("execute error", e);
+                        } finally {
+                            logger.info("getImageTime: {}, getValidationCodeTime: {}, submitTime: {}, success: {}, id: {}"
+                                    , (t2 - t1), (t3 - t2), (t4 - t3), qdTask.getStatus(), qdTask.getId());
+                        }
+                    });
+                    sleep(span);
+                }
             }
-            t2 = System.currentTimeMillis();
-            if (code == null) {
-                code = getValidationCode();
-            }
-            t3 = System.currentTimeMillis();
-            submit(code);
-            code = null;
-            t4 = System.currentTimeMillis();
         } catch (Exception e) {
             logger.error("qd throws exception, {}, id: {}", e.getMessage(), qdTask.getId(), e);
             qdTask.setMessage(e.getMessage());
             qdTask.setGmtModified(new Date());
-        } finally {
-            retry += 1;
-            logger.info("getImageTime: {}, getValidationCodeTime: {}, submitTime: {}, success: {}, id: {}"
-                    , (t2 - t1), (t3 - t2), (t4 - t3), qdTask.getStatus(), qdTask.getId());
         }
     }
 
-
-    private long timeRemainMillis() throws IOException {
-        long cur = System.currentTimeMillis();
-        long thisTimeRemain = timeRemainMillis - (cur - getTimeRemainMillisTimestamp);
-
-        if (thisTimeRemain > stopGetRemainTimeThresholdMillis) {
-            long start = System.currentTimeMillis();
-            thisTimeRemain = timeRemainMillisInternal(qdTask.getConfig().getCookie()) + 1;
-            long end = System.currentTimeMillis();
-            getTimeRemainMillisTimestamp = end;
-            if (thisTimeRemain >= 0) {
-                thisTimeRemain = thisTimeRemain * 1000 - (end - start) / 2;
-            } else {
-                thisTimeRemain = thisTimeRemain - (end - start) / 2;
-            }
-        }
-        return thisTimeRemain;
+    private final Random random = new Random(System.currentTimeMillis());
+    private long timeRemain() throws IOException {
+        int cookieCount = qdTask.getConfig().getCookie().size();
+        String cookie = qdTask.getConfig().getCookie().get(random.nextInt(cookieCount));
+        return timeRemainInternal(cookie);
     }
 
-    private long timeRemainMillisInternal(String cookie) throws IOException {
+    private long timeRemainInternal(String cookie) throws IOException {
         logger.info("start to get remain time, id: {}", qdTask.getId());
         long start = System.currentTimeMillis();
         HttpGet getTimeMethod = createGetTimeMethod(cookie);
@@ -182,10 +377,10 @@ public class QdRunnable implements Runnable {
         return Long.parseLong(time);
     }
 
-    private void getImage() throws IOException {
-        tempFileName = tempFilePrefix + picIndex.getAndIncrement() + ".jpg";
+    private String getImage(String cookie) throws IOException {
+        String tempFileName = tempFilePrefix + picIndex.getAndIncrement() + ".jpg";
         logger.info("start to getImage, fileName: {}, id: {}", tempFileName, qdTask.getId());
-        HttpGet getImageMethod = createGetImageMethod();
+        HttpGet getImageMethod = createGetImageMethod(cookie);
         HttpResponse response = client.execute(getImageMethod);
         byte[] bytes = EntityUtils.toByteArray(response.getEntity());
         FileOutputStream outputStream = new FileOutputStream(tempFileName);
@@ -193,11 +388,12 @@ public class QdRunnable implements Runnable {
         outputStream.flush();
         outputStream.close();
         logger.info("getImage success, fileName: {}, id: {}", tempFileName, qdTask.getId());
+        return tempFileName;
     }
 
-    private String getValidationCode() throws IOException {
+    private String getValidationCode(String tempFileName) throws IOException {
         logger.info("start to recognize pic {}, id: {}", tempFileName, qdTask.getId());
-        HttpPost getValidationCodeMethod = createGetValidationCodeMethod();
+        HttpPost getValidationCodeMethod = createGetValidationCodeMethod(tempFileName);
         HttpResponse response = client.execute(getValidationCodeMethod);
         String content = EntityUtils.toString(response.getEntity());
         String result = JSON.parseObject(content).getString("result");
@@ -214,9 +410,9 @@ public class QdRunnable implements Runnable {
         return result;
     }
 
-    private void submit(String code) throws IOException {
+    private void submit(String code, String cookie) throws IOException {
         logger.info("start to submit, id: {}", qdTask.getId());
-        HttpPost saveMethod = createSaveMethod(code);
+        HttpPost saveMethod = createSaveMethod(code, cookie);
         HttpResponse response = client.execute(saveMethod);
         String content = EntityUtils.toString(response.getEntity());
         qdTask.setResult(content);
@@ -254,7 +450,7 @@ public class QdRunnable implements Runnable {
         return httpGet;
     }
 
-    private HttpGet createGetImageMethod() {
+    private HttpGet createGetImageMethod(String cookie) {
         HttpGet httpGet = new HttpGet("https://www.sh.msa.gov.cn/zwzx/views/image.jsp");
         httpGet.setConfig(
                 RequestConfig.custom()
@@ -262,11 +458,11 @@ public class QdRunnable implements Runnable {
                         .setConnectTimeout(3000)
                         .build()
         );
-        httpGet.setHeader("Cookie", qdTask.getConfig().getCookie());
+        httpGet.setHeader("Cookie", cookie);
         return httpGet;
     }
 
-    private HttpPost createGetValidationCodeMethod() {
+    private HttpPost createGetValidationCodeMethod(String tempFileName) {
         HttpPost httpPost = new HttpPost("http://localhost:8050/captcharecognize");
         RequestConfig requestConfig = RequestConfig.custom()
                 .setSocketTimeout(3000)
@@ -280,14 +476,14 @@ public class QdRunnable implements Runnable {
         return httpPost;
     }
 
-    private HttpPost createSaveMethod(String code) {
+    private HttpPost createSaveMethod(String code, String cookie) {
         HttpPost httpPost = new HttpPost("https://www.sh.msa.gov.cn/zwzx/applyVtsDeclare1/save/");
         RequestConfig requestConfig = RequestConfig.custom()
                 .setSocketTimeout(3000)
                 .setConnectTimeout(3000)
                 .build();
         httpPost.setConfig(requestConfig);
-        httpPost.setHeader("Cookie", qdTask.getConfig().getCookie());
+        httpPost.setHeader("Cookie", cookie);
         String boundary = "----WebKitFormBoundaryinIIzQYX8Ulb5B4z";
         httpPost.setHeader("Content-Type","multipart/form-data; boundary="+boundary);
         httpPost.setEntity(getSaveEntity2(code, boundary));
@@ -387,116 +583,6 @@ public class QdRunnable implements Runnable {
         return entityBuilder.build();
     }
 
-    private HttpEntity getSaveEntity1(String code) throws UnsupportedEncodingException {
-        String boundary = "----WebKitFormBoundaryinIIzQYX8Ulb5B4z";
-        StringBuffer buffer = new StringBuffer();
-        TaskParam param = qdTask.getParam();
-        ShipTypeEnum type = ShipTypeEnum.of(param.getShipType());
-        writeField(buffer, boundary, "shipType", type == null ? "" : type.getValue());
-
-        writeField(buffer, boundary, "name1", "1");
-        writeField(buffer, boundary, "name2", "1");
-        writeField(buffer, boundary, "name3", "1");
-        writeField(buffer, boundary, "name4", "1");
-        writeField(buffer, boundary, "name5", "1");
-
-        writeField(buffer, boundary, "speed", param.getSpeed());
-        writeField(buffer, boundary, "maximumDraught", param.getDeep());
-        writeField(buffer, boundary, "totalPeople1", param.getCrewNumber());
-        writeField(buffer, boundary, "eta", param.getEta());
-        writeField(buffer, boundary, "startPort", param.getStartHarbor().split("-")[1]);
-        writeField(buffer, boundary, "beyondBreadth", param.getWidthLeft());
-        writeField(buffer, boundary, "beyondBreadthRight", param.getWidthRight());
-        writeField(buffer, boundary, "endPort", param.getDestHarbor().split("-")[1]);
-        writeField(buffer, boundary, "berthingPosition", param.getPosition());
-        writeField(buffer, boundary, "goodsType", param.getGoodsType().split("-")[0]);
-        writeField(buffer, boundary, "goodsName", param.getGoodsType().split("-")[1]);
-        writeField(buffer, boundary, "totalCargoWeight", param.getTotalWeight());
-        writeField(buffer, boundary, "remark", param.getRemark());
-
-        writeField(buffer, boundary, "startPosition", "");
-        writeField(buffer, boundary, "endPosition", "");
-        writeField(buffer, boundary, "maximumDraught1", "");
-        writeField(buffer, boundary, "startPort1", "");
-        writeField(buffer, boundary, "endPort1", "");
-        writeField(buffer, boundary, "leavePosition1", "");
-        writeField(buffer, boundary, "berthingPosition1", "");
-        writeField(buffer, boundary, "goodsType1", "");
-        writeField(buffer, boundary, "totalCargoWeight1", "");
-        writeField(buffer, boundary, "remark1", "");
-        writeField(buffer, boundary, "maximumDraught2", "");
-        writeField(buffer, boundary, "startPort2", "");
-        writeField(buffer, boundary, "endPort2", "");
-        writeField(buffer, boundary, "leavePosition2", "");
-        writeField(buffer, boundary, "berthingPosition2", "");
-        writeField(buffer, boundary, "attachmentPath", "");
-        writeField(buffer, boundary, "remark2", "");
-
-        writeField(buffer, boundary, "saveCode", code);
-        writeField(buffer, boundary, "vtsStatus", "0");
-
-        JSONObject savePosition = new JSONObject(), importPosition = new JSONObject();
-        // 业务项目
-        savePosition.put("id", "");
-        savePosition.put("type", encode64(param.getName()));
-        savePosition.put("shipId", encode64(param.getShip()));
-        savePosition.put("declareShipType", param.getShipType());
-        savePosition.put("passTime", encode64(param.getTime()));
-        savePosition.put("speed", param.getSpeed());
-        savePosition.put("maximumDraught", param.getDeep());
-        savePosition.put("beyondBreadth", param.getWidthLeft());
-        savePosition.put("beyondBreadthRight", param.getWidthRight());
-        savePosition.put("endPort", param.getDestHarbor());
-        savePosition.put("startPort", param.getStartHarbor());
-        savePosition.put("goodsType", param.getGoodsType());
-        savePosition.put("berthingPosition", param.getPosition());
-        // 离港
-        savePosition.put("leavePosition", "");
-        savePosition.put("totalCargoWeight", param.getTotalWeight());
-
-        if("1".equals(param.getIsDay())) {
-            // 夜航
-            savePosition.put("nightCheck1", "1");
-            savePosition.put("nightCheck2", "1");
-            savePosition.put("nightCheck3", "1");
-            savePosition.put("nightCheck4", "1");
-            savePosition.put("nightCheck5", "1");
-            savePosition.put("nightCheckResult", Integer.parseInt(param.getIsDay()));
-        } else {
-            savePosition.put("nightCheck1", "");
-            savePosition.put("nightCheck2", "");
-            savePosition.put("nightCheck3", "");
-            savePosition.put("nightCheck4", "");
-            savePosition.put("nightCheck5", "");
-            savePosition.put("nightCheckResult", "");
-        }
-
-        savePosition.put("expectArriveTime", param.getEta());
-        savePosition.put("remark", param.getRemark());
-
-        writeField(buffer, boundary, "savePostion", JSON.toJSONString(savePosition));
-        writeEnd(buffer, boundary);
-        String content = buffer.toString();
-
-        logger.info("save method content: {}", content);
-        return new StringEntity(content);
-    }
-
-    private void writeField(StringBuffer buffer, String boundary, String key, String value) {
-        buffer.append("--");
-        buffer.append(boundary);
-        buffer.append("\r\n");
-        buffer.append("Content-Disposition: form-data; name=\"").append(key).append("\"\r\n\r\n");
-        buffer.append(value);
-        buffer.append("\r\n");
-    }
-
-    private void writeEnd(StringBuffer buffer, String boundary) {
-        buffer.append("--");
-        buffer.append(boundary);
-        buffer.append("--\r\n");
-    }
-
     private boolean shouldBreak() {
         return retry >= MAX_RETRY_COUNT || qdTask.getStatus() == QdStatusEnum.FAILED || qdTask.getStatus() == QdStatusEnum.SUCCESS;
     }
@@ -508,9 +594,14 @@ public class QdRunnable implements Runnable {
         }
     }
 
-    // TODO
     private static String encode64(String original) {
         Base64.Encoder encoder = Base64.getEncoder();
         return encoder.encodeToString(original.getBytes());
+    }
+
+    private static class TimeEstimationNode {
+        long start;
+        long end;
+        long time;
     }
 }

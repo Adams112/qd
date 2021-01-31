@@ -7,21 +7,24 @@ import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
 
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.Arrays;
 
 @Controller
 @RequestMapping("/home")
 public class TestController {
-    private HttpClient clientRec = HttpClients.createDefault();
+    private final HttpClient clientRec = HttpClients.createDefault();
+    private final CloseableHttpClient client = HttpClients.createDefault();
     @RequestMapping("/test")
     @ResponseBody
     public Object test(String method) throws IOException {
@@ -61,5 +64,83 @@ public class TestController {
         System.out.println("execute: " + (stamp3 - stamp2));
         System.out.println("total: " + (stamp3 - stamp1));
         return "OK";
+    }
+
+    @RequestMapping("/test2")
+    @ResponseBody
+    public Object test2() throws IOException {
+        long start = System.currentTimeMillis();
+        String tempFileName = "temp.jpg";
+        HttpGet httpGet = new HttpGet("https://www.sh.msa.gov.cn/zwzx/views/image.jsp");
+        httpGet.setConfig(
+                RequestConfig.custom()
+                        .setSocketTimeout(3000)
+                        .setConnectTimeout(3000)
+                        .build()
+        );
+        CloseableHttpClient client = HttpClients.createDefault();
+        HttpResponse response = client.execute(httpGet);
+        byte[] bytes = EntityUtils.toByteArray(response.getEntity());
+        FileOutputStream outputStream = new FileOutputStream(tempFileName);
+        outputStream.write(bytes);
+        outputStream.flush();
+        outputStream.close();
+        client.close();
+        long end = System.currentTimeMillis();
+        System.out.println("time: " + (end - start));
+        return "ok";
+    }
+
+    @RequestMapping("/test3")
+    @ResponseBody
+    public Object test3() throws IOException {
+        long start = System.currentTimeMillis();
+        String tempFileName = "temp.jpg";
+        HttpGet httpGet = new HttpGet("https://www.sh.msa.gov.cn/zwzx/views/image.jsp");
+        httpGet.setConfig(
+                RequestConfig.custom()
+                        .setSocketTimeout(3000)
+                        .setConnectTimeout(3000)
+                        .build()
+        );
+
+        HttpResponse response = client.execute(httpGet);
+        byte[] bytes = EntityUtils.toByteArray(response.getEntity());
+        FileOutputStream outputStream = new FileOutputStream(tempFileName);
+        outputStream.write(bytes);
+        outputStream.flush();
+        outputStream.close();
+        long end = System.currentTimeMillis();
+        System.out.println("time: " + (end - start));
+        return "ok";
+    }
+
+    public static void main(String[] args) throws IOException {
+        CloseableHttpClient client = HttpClients.createDefault();
+        HttpGet httpGet = new HttpGet("https://www.sh.msa.gov.cn/zwzx/views/image.jsp");
+        httpGet.setConfig(
+                RequestConfig.custom()
+                        .setSocketTimeout(3000)
+                        .setConnectTimeout(3000)
+                        .build()
+        );
+
+        HttpResponse response1 = client.execute(httpGet);
+        HttpResponse response2 = client.execute(httpGet);
+        HttpResponse response3 = client.execute(httpGet);
+        HttpResponse response4 = client.execute(httpGet);
+
+        write("temp1.jpg", response1);
+        write("temp2.jpg", response2);
+        write("temp3.jpg", response3);
+        write("temp4.jpg", response4);
+    }
+
+    public static void write(String file, HttpResponse response) throws IOException {
+        byte[] bytes = EntityUtils.toByteArray(response.getEntity());
+        FileOutputStream outputStream = new FileOutputStream(file);
+        outputStream.write(bytes);
+        outputStream.flush();
+        outputStream.close();
     }
 }

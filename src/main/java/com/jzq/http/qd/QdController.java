@@ -67,7 +67,7 @@ public class QdController {
         task.setGmtCreate(new Date());
         task.setStatus(QdStatusEnum.NEW);
         tasks.add(task);
-        executor.execute(new QdRunnable(task));
+        executor.execute(new QdRunnable(task, executor));
         return id;
     }
 
