@@ -22,13 +22,14 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 
-public class QdRunnable implements Runnable {
+public class QdRunnable2 implements Runnable {
     private static final Logger logger = LoggerFactory.getLogger(QdRunnable.class);
 
     private static final int MAX_RETRY_COUNT = 5;
@@ -42,6 +43,17 @@ public class QdRunnable implements Runnable {
     private final AtomicInteger picIndex = new AtomicInteger(0);
     private final String tempFilePrefix;
     private final HttpClient client = HttpClients.createDefault();
+
+    private static ThreadPoolExecutor getTimeExecutor = new ThreadPoolExecutor(1, 1, 100L
+            , TimeUnit.SECONDS, new ArrayBlockingQueue<>(100));
+
+    public static class GetTimeRunnable implements Runnable {
+
+        @Override
+        public void run() {
+
+        }
+    }
 
     // 预估服务器时间相关，只有一个线程会预估时间
     private static int threadCount = 0;
@@ -57,7 +69,7 @@ public class QdRunnable implements Runnable {
     private static final Object nodeLock = new Object();
     private static final List<Thread> waitingThreads = new ArrayList<>();
 
-    public QdRunnable(QdTask qdTask, ThreadPoolExecutor executor) {
+    public QdRunnable2(QdTask qdTask, ThreadPoolExecutor executor) {
         this.qdTask = qdTask;
         this.executor = executor;
         this.cookies = qdTask.getConfig().getCookie();
@@ -66,6 +78,8 @@ public class QdRunnable implements Runnable {
             threadCount++;
             if (taskId == -1) {
                 taskId = qdTask.getId();
+            } else {
+                waitingThreads.add(Thread.currentThread());
             }
         }
         tempFilePrefix = "/root/temp/pics/" + qdTask.getId() + "/";
@@ -98,7 +112,7 @@ public class QdRunnable implements Runnable {
                             sleep(timeRemainMillis - 100);
                         }
                     } else {
-                        long low = estimatedLow - 1000, high = estimatedHigh + 100;
+                        long low = estimatedLow - 100, high = estimatedHigh + 100;
                         long span = (high - low) / cookies.size();
                         runTask(span);
                         retry++;
@@ -141,7 +155,7 @@ public class QdRunnable implements Runnable {
                         }
 
                         long timeToSleep;
-                        long threshold = 15 * 60;
+                        long threshold = 25 * 60;
 //                        long threshold = Long.MAX_VALUE - 1;
                         if (timeRemain > threshold) {
                             timeToSleep = (timeRemain - threshold) * 1000;
@@ -167,7 +181,6 @@ public class QdRunnable implements Runnable {
                         }
                     } else {
                         // 未估计过时间，且不是由自己来估计时间，无期限休眠，等待唤醒
-                        waitingThreads.add(Thread.currentThread());
                         LockSupport.park(this);
                     }
                 }
