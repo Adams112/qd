@@ -65,6 +65,7 @@ public class QdRunnable implements Runnable {
             allCookies.addAll(cookies);
             threadCount++;
             if (taskId == -1) {
+                logger.info("time predicate by task: {}", qdTask.getId());
                 taskId = qdTask.getId();
             }
         }
@@ -87,18 +88,19 @@ public class QdRunnable implements Runnable {
                 boolean localRunBySelf = runBySelf;
                 if (localEstimated) {
                     long timeRemainMillis = estimatedLow - System.currentTimeMillis();
-                    if (timeRemainMillis > 15000) {
+                    long time1 = 15000, time2 = 1000;
+                    if (timeRemainMillis > time1) {
                         logger.info("time remain {}ms, sleep, id: {}", timeRemainMillis,
                                 qdTask.getId());
-                        sleep(timeRemainMillis - 15000);
-                    } else if (timeRemainMillis > 100) {
+                        sleep(timeRemainMillis - time1);
+                    } else if (timeRemainMillis > time2) {
                         if(!codesGot) {
                             preGetCodes(timeRemainMillis);
                         } else {
-                            sleep(timeRemainMillis - 100);
+                            sleep(timeRemainMillis - time2);
                         }
                     } else {
-                        long low = estimatedLow - 1000, high = estimatedHigh + 100;
+                        long low = estimatedLow - time2, high = estimatedHigh + 100;
                         long span = (high - low) / cookies.size();
                         runTask(span);
                         retry++;
@@ -107,24 +109,37 @@ public class QdRunnable implements Runnable {
                     long timeRemain;
                     try {
                         timeRemain = timeRemain();
-                    } catch (IOException e) {
+                    } catch (Exception e) {
                         // 时间获取出错，直接重试
                         logger.error("get time error, {}", e.getMessage(), e);
+                        sleep(random.nextInt(2000));
                         retry++;
                         continue;
                     }
 
-                    if (timeRemain > 0) {
-                        if(!codesGot) {
-                            preGetCodes(timeRemain * 1000);
-                        } else {
-                            sleep(timeRemain * 1000);
-                            runTask(200);
-                            retry++;
-                        }
-                    } else {
+                    long expect = System.currentTimeMillis() + timeRemain * 1000;
+                    long cur;
+                    cur = System.currentTimeMillis();
+                    if (expect - cur > 15 * 1000) {
+                        sleep(expect - cur - 15 * 1000);
+                    }
+                    cur = System.currentTimeMillis();
+                    if (!codesGot) {
+                        preGetCodes(expect - cur);
+                    }
+                    if (!codesGot) {
+                        logger.info("retry getCodes");
+                        preGetCodes(expect - cur);
+                    }
+                    if (!codesGot) {
+                        logger.info("retry getCodes");
+                        preGetCodes(expect - cur);
+                    }
+
+                    cur = System.currentTimeMillis();
+                    sleep(expect - cur);
+                    while (retry++ < MAX_RETRY_COUNT) {
                         runTask(200);
-                        retry++;
                     }
                 } else {
                     long localTaskId = taskId;
@@ -133,16 +148,16 @@ public class QdRunnable implements Runnable {
                         long timeRemain;
                         try {
                             timeRemain = timeRemain();
-                        } catch (IOException e) {
+                        } catch (Throwable e) {
                             // 时间获取出错，直接重试
                             logger.error("get time error, {}", e.getMessage(), e);
+                            sleep(random.nextInt(2000));
                             retry++;
                             continue;
                         }
 
                         long timeToSleep;
                         long threshold = 15 * 60;
-//                        long threshold = Long.MAX_VALUE - 1;
                         if (timeRemain > threshold) {
                             timeToSleep = (timeRemain - threshold) * 1000;
                             logger.info("time remain {}s, sleep for {}ms, id: {}", timeRemain,
@@ -167,8 +182,10 @@ public class QdRunnable implements Runnable {
                         }
                     } else {
                         // 未估计过时间，且不是由自己来估计时间，无期限休眠，等待唤醒
+                        logger.info("park, id: {}", qdTask.getId());
                         waitingThreads.add(Thread.currentThread());
                         LockSupport.park(this);
+                        logger.info("wake up, id: {}", qdTask.getId());
                     }
                 }
             }
@@ -372,8 +389,12 @@ public class QdRunnable implements Runnable {
         HttpResponse execute = client.execute(getTimeMethod);
         String time = EntityUtils.toString(execute.getEntity());
         long end = System.currentTimeMillis();
-        logger.info("get remain time finished: {}, time used: {}, id: {}", time, (end - start), qdTask.getId());
-        return Long.parseLong(time);
+        logger.info("get remain time finished, time used: {}, id: {}", (end - start), qdTask.getId());
+        try {
+            return Long.parseLong(time);
+        } catch (Throwable t) {
+            throw new RuntimeException("parse time error");
+        }
     }
 
     private String getImage(String cookie) throws IOException {
@@ -586,7 +607,7 @@ public class QdRunnable implements Runnable {
         return retry >= MAX_RETRY_COUNT || qdTask.getStatus() == QdStatusEnum.FAILED || qdTask.getStatus() == QdStatusEnum.SUCCESS;
     }
 
-    private static void sleep(Long timeMillis) {
+    private static void sleep(long timeMillis) {
         try {
             Thread.sleep(timeMillis);
         } catch (InterruptedException ignored) {
