@@ -57,6 +57,11 @@ public class QdRunnable implements Runnable {
     private static final Object nodeLock = new Object();
     private static final List<Thread> waitingThreads = new ArrayList<>();
 
+    private static long estimateExpectTime = 0;
+    private static boolean estimatedExpect = false;
+    private static final Object estimateLock2 = new Object();
+
+
     public QdRunnable(QdTask qdTask, ThreadPoolExecutor executor) {
         this.qdTask = qdTask;
         this.executor = executor;
@@ -103,21 +108,26 @@ public class QdRunnable implements Runnable {
                         long low = estimatedLow - time2, high = estimatedHigh + 100;
                         long span = (high - low) / cookies.size();
                         runTask(span);
-                        retry++;
+                        return;
                     }
                 } else if (localRunBySelf) {
-                    long timeRemain;
-                    try {
-                        timeRemain = timeRemain();
-                    } catch (Exception e) {
-                        // 时间获取出错，直接重试
-                        logger.error("get time error, {}", e.getMessage(), e);
-                        sleep(random.nextInt(2000));
-                        retry++;
-                        continue;
+                    if (!estimatedExpect) {
+                        try {
+                            long timeRemain = timeRemain();
+                            synchronized (estimateLock2) {
+                                estimateExpectTime = System.currentTimeMillis() + timeRemain * 1000;
+                                estimatedExpect = true;
+                            }
+                        } catch (Exception e) {
+                            // 时间获取出错，直接重试
+                            logger.error("get time error, {}", e.getMessage(), e);
+                            sleep(random.nextInt(2000));
+                            retry++;
+                            continue;
+                        }
                     }
 
-                    long expect = System.currentTimeMillis() + timeRemain * 1000;
+                    long expect = estimateExpectTime;
                     long cur;
                     cur = System.currentTimeMillis();
                     if (expect - cur > 15 * 1000) {
@@ -138,16 +148,18 @@ public class QdRunnable implements Runnable {
 
                     cur = System.currentTimeMillis();
                     sleep(expect - cur);
-                    while (retry++ < MAX_RETRY_COUNT) {
-                        runTask(200);
-                    }
+                    runTask(200);
+                    return;
                 } else {
                     long localTaskId = taskId;
                     if (localTaskId == qdTask.getId()) {
                         // 线程保证无论如何，都要唤醒其他线程
-                        long timeRemain;
                         try {
-                            timeRemain = timeRemain();
+                            long timeRemain = timeRemain();
+                            synchronized (estimateLock2) {
+                                estimateExpectTime = System.currentTimeMillis() + timeRemain * 1000;
+                                estimatedExpect = true;
+                            }
                         } catch (Throwable e) {
                             // 时间获取出错，直接重试
                             logger.error("get time error, {}", e.getMessage(), e);
@@ -156,29 +168,34 @@ public class QdRunnable implements Runnable {
                             continue;
                         }
 
+                        long expect = estimateExpectTime;
+                        long cur = System.currentTimeMillis();
                         long timeToSleep;
-                        long threshold = 15 * 60;
-                        if (timeRemain > threshold) {
-                            timeToSleep = (timeRemain - threshold) * 1000;
-                            logger.info("time remain {}s, sleep for {}ms, id: {}", timeRemain,
-                                    timeToSleep, qdTask.getId());
-                            sleep(timeToSleep);
-                        } else if (timeRemain < 10 || estimateTimeRetry >= MAX_RETRY_COUNT) {
+                        long threshold = 55 * 60;
+
+                        if (expect - cur < 10000 || estimateTimeRetry >= MAX_RETRY_COUNT) {
                             runBySelf = true;
                             wakeUpThreads();
+                        }
+
+                        while (expect - cur > threshold * 1000) {
+                            timeToSleep = expect - cur - threshold * 1000;
+                            logger.info("sleep for {}ms, id: {}", timeToSleep, qdTask.getId());
+                            sleep(timeToSleep);
+                            cur = System.currentTimeMillis();
+                        }
+
+                        estimateTimeRetry++;
+                        try {
+                            estimateTime();
+                        } catch (Exception e) {
+                            logger.error(e.getMessage(), e);
+                        }
+                        localEstimated = estimated;
+                        if (localEstimated) {
+                            wakeUpThreads();
                         } else {
-                            estimateTimeRetry++;
-                            try {
-                                estimateTime();
-                            } catch (Exception e) {
-                                logger.error(e.getMessage(), e);
-                            }
-                            localEstimated = estimated;
-                            if (localEstimated) {
-                                wakeUpThreads();
-                            } else {
-                                sleep(200000L);
-                            }
+                            sleep(20000L);
                         }
                     } else {
                         // 未估计过时间，且不是由自己来估计时间，无期限休眠，等待唤醒
@@ -211,6 +228,7 @@ public class QdRunnable implements Runnable {
             if (--threadCount == 0) {
                 estimateTimeRetry = 0;
                 estimated = false;
+                estimatedExpect = false;
                 runBySelf = false;
                 taskId = -1;
                 estimatedLow = Long.MAX_VALUE;
@@ -435,27 +453,29 @@ public class QdRunnable implements Runnable {
         HttpPost saveMethod = createSaveMethod(code, cookie);
         HttpResponse response = client.execute(saveMethod);
         String content = EntityUtils.toString(response.getEntity());
-        qdTask.setResult(content);
         JSONObject object = JSON.parseObject(content);
         logger.info("submit result: {}", content);
 
         String result = object.getString("resultDesc");
-
-        if ("验证码错误！".equals(result)) {
-            // retry
-        } else if ("当前时间点已被申报，是否选择排队？".equals(result)) {
-            qdTask.setStatus(QdStatusEnum.FAILED);
-        } else if ("当前船舶已经申报成功,请勿重新提交！".equals(result)) {
-            qdTask.setStatus(QdStatusEnum.FAILED);
-        } else if ("申报参数填写错误，请仔细核查申报信息。".equals(result)) {
-            qdTask.setStatus(QdStatusEnum.FAILED);
-        } else if ("请在申报时间内进行申报".equals(result)) {
-            // retry
-        } else if ("操作成功".equals(result)) {
-            qdTask.setStatus(QdStatusEnum.SUCCESS);
-        } else {
-            qdTask.setStatus(QdStatusEnum.FAILED);
+        if (qdTask.getStatus() != QdStatusEnum.SUCCESS && qdTask.getStatus() != QdStatusEnum.FAILED) {
+            qdTask.setResult(content);
+            if ("验证码错误！".equals(result)) {
+                // retry
+            } else if ("当前时间点已被申报，是否选择排队？".equals(result)) {
+                qdTask.setStatus(QdStatusEnum.FAILED);
+            } else if ("当前船舶已经申报成功,请勿重新提交！".equals(result)) {
+                qdTask.setStatus(QdStatusEnum.FAILED);
+            } else if ("申报参数填写错误，请仔细核查申报信息。".equals(result)) {
+                qdTask.setStatus(QdStatusEnum.FAILED);
+            } else if ("请在申报时间内进行申报".equals(result)) {
+                // retry
+            } else if ("操作成功".equals(result)) {
+                qdTask.setStatus(QdStatusEnum.SUCCESS);
+            } else {
+                qdTask.setStatus(QdStatusEnum.FAILED);
+            }
         }
+
         logger.info("submit success: {}, id: {}", qdTask.getStatus(), qdTask.getId());
     }
 
