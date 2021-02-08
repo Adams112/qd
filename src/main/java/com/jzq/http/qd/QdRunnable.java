@@ -168,35 +168,8 @@ public class QdRunnable implements Runnable {
                             continue;
                         }
 
-                        long expect = estimateExpectTime;
-                        long cur = System.currentTimeMillis();
-                        long timeToSleep;
-                        long threshold = 55 * 60;
-
-                        if (expect - cur < 10000 || estimateTimeRetry >= MAX_RETRY_COUNT) {
-                            runBySelf = true;
-                            wakeUpThreads();
-                        }
-
-                        while (expect - cur > threshold * 1000) {
-                            timeToSleep = expect - cur - threshold * 1000;
-                            logger.info("sleep for {}ms, id: {}", timeToSleep, qdTask.getId());
-                            sleep(timeToSleep);
-                            cur = System.currentTimeMillis();
-                        }
-
-                        estimateTimeRetry++;
-                        try {
-                            estimateTime();
-                        } catch (Exception e) {
-                            logger.error(e.getMessage(), e);
-                        }
-                        localEstimated = estimated;
-                        if (localEstimated) {
-                            wakeUpThreads();
-                        } else {
-                            sleep(20000L);
-                        }
+                        runBySelf = true;
+                        wakeUpThreads();
                     } else {
                         // 未估计过时间，且不是由自己来估计时间，无期限休眠，等待唤醒
                         logger.info("park, id: {}", qdTask.getId());
@@ -456,9 +429,9 @@ public class QdRunnable implements Runnable {
         JSONObject object = JSON.parseObject(content);
         logger.info("submit result: {}", content);
 
-        String result = object.getString("resultDesc");
-        if (qdTask.getStatus() != QdStatusEnum.SUCCESS && qdTask.getStatus() != QdStatusEnum.FAILED) {
+        if (qdTask.getStatus() != QdStatusEnum.SUCCESS) {
             qdTask.setResult(content);
+            String result = object.getString("resultDesc");
             if ("验证码错误！".equals(result)) {
                 // retry
             } else if ("当前时间点已被申报，是否选择排队？".equals(result)) {
