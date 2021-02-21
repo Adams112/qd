@@ -10,6 +10,8 @@ import org.springframework.web.bind.annotation.ResponseBody;
 
 import javax.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -32,14 +34,18 @@ public class QdController {
     public QdController() {
         Runnable runnable = () -> {
             Iterator<QdTask> iterator = tasks.iterator();
+            Calendar cal = Calendar.getInstance();
+            cal.setTimeInMillis(System.currentTimeMillis());
+            cal.add(Calendar.DAY_OF_MONTH, -7);
+
             while (iterator.hasNext()) {
                 QdTask task = iterator.next();
-                QdStatusEnum taskStatus = task.getStatus();
-                if (taskStatus == QdStatusEnum.SUCCESS || taskStatus == QdStatusEnum.FAILED) {
-                    logger.info("remove task: {}", task);
+                Calendar cal2 = Calendar.getInstance();
+                cal2.setTimeInMillis(task.getGmtCreate().getTime());
+                if (cal2.before(cal)) {
+                    logger.info("remove task {}", task.getId());
                     iterator.remove();
                 }
-
             }
         };
         scheduledThreadPoolExecutor.scheduleAtFixedRate(runnable, 12L, 24L, TimeUnit.HOURS);
@@ -87,7 +93,7 @@ public class QdController {
         return removed;
     }
 
-    @RequestMapping("getTask")
+    @RequestMapping("/getTask")
     @ResponseBody
     public Object getTask() {
         List<QdTask> result = new ArrayList<>(tasks);
@@ -146,5 +152,16 @@ public class QdController {
         } else {
             return defaultValue;
         }
+    }
+
+    public static void main(String[] args) throws ParseException {
+        Calendar instance = Calendar.getInstance();
+        instance.setTimeInMillis(System.currentTimeMillis());
+        SimpleDateFormat format = new SimpleDateFormat("yyyyMMdd");
+        Date parse = format.parse("20210131");
+        Calendar ins2 = Calendar.getInstance();
+        ins2.setTimeInMillis(parse.getTime());
+        instance.add(Calendar.DAY_OF_MONTH, -7);
+        System.out.println(instance.before(ins2));
     }
 }
