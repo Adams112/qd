@@ -68,14 +68,15 @@ public class QdRunnable implements Runnable {
             /*
              * 如果剩余时间 < 1s，开始提交
              */
+
             timeRemain = expect - System.currentTimeMillis();
-            if (timeRemain > 1000) {
-                sleep(timeRemain - 1000);
+            if (timeRemain > 2000) {
+                sleep(timeRemain - 2000);
             }
             int cookieCount = codes.size();
-            long span = timeRemain / cookieCount;
-            if (span <= 0) {
-                span = 50;
+            long span = 2000 / cookieCount;
+            if (span <= 0 || span > 1000) {
+                span = 100;
             }
             for (Map.Entry<String, String> entry : codes.entrySet()) {
                 submit(entry.getValue(), entry.getKey());
@@ -99,7 +100,8 @@ public class QdRunnable implements Runnable {
         for (String cookie : qdTask.getConfig().getCookie()) {
             try {
                 futures.put(cookie, executor.submit(() -> codePredictUtil.getCode(cookie)));
-            } catch (Throwable ignore) {
+            } catch (Throwable e) {
+                logger.error(e.getMessage(), e);
             }
         }
 
@@ -120,7 +122,8 @@ public class QdRunnable implements Runnable {
         executor.execute(() -> {
             try {
                 submitUtil.submit(code, cookie);
-            } catch (Throwable ignore) {
+            } catch (Throwable e) {
+                logger.error(e.getMessage(), e);
             }
         });
     }
@@ -130,7 +133,8 @@ public class QdRunnable implements Runnable {
             if (timeMillis > 0) {
                 Thread.sleep(timeMillis);
             }
-        } catch (InterruptedException ignored) {
+        } catch (InterruptedException e) {
+            logger.error(e.getMessage(), e);
         }
     }
 }

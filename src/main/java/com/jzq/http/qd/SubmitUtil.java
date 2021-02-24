@@ -64,8 +64,8 @@ public class SubmitUtil {
     private HttpPost createSaveMethod(String code, String cookie) {
         HttpPost httpPost = new HttpPost("https://www.sh.msa.gov.cn/zwzx/applyVtsDeclare1/save/");
         RequestConfig requestConfig = RequestConfig.custom()
-                .setSocketTimeout(3000)
-                .setConnectTimeout(3000)
+                .setSocketTimeout(30000)
+                .setConnectTimeout(30000)
                 .build();
         httpPost.setConfig(requestConfig);
         httpPost.setHeader("Cookie", cookie);

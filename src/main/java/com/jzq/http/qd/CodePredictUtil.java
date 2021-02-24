@@ -49,7 +49,8 @@ public class CodePredictUtil {
             } catch (Throwable ignore) {
                 try {
                     Thread.sleep(50);
-                } catch (Throwable ignored) {
+                } catch (Throwable e) {
+                    logger.error(e.getMessage(), e);
                 }
             }
         }
@@ -65,7 +66,8 @@ public class CodePredictUtil {
             } catch (Throwable ignore) {
                 try {
                     Thread.sleep(50);
-                } catch (Throwable ignored) {
+                } catch (Throwable e) {
+                    logger.error(e.getMessage(), e);
                 }
             }
         }
