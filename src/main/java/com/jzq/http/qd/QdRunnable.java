@@ -16,6 +16,8 @@ import java.util.concurrent.locks.LockSupport;
 
 public class QdRunnable implements Runnable {
     private static final Logger logger = LoggerFactory.getLogger(QdRunnable.class);
+    private static final HttpClient client = HttpClients.createDefault();
+    private static final List<Thread> waitingThreads = new ArrayList<>();
 
     private final QdTask qdTask;
     private final ThreadPoolExecutor executor;
@@ -24,15 +26,12 @@ public class QdRunnable implements Runnable {
     private final CodePredictUtil codePredictUtil;
     private final SubmitUtil submitUtil;
 
-    private static final HttpClient client = HttpClients.createDefault();
-    private static final List<Thread> waitingThreads = new ArrayList<>();
-
     public QdRunnable(QdTask qdTask, ThreadPoolExecutor executor) {
         this.qdTask = qdTask;
         this.executor = executor;
         this.timeRemainUtil = new TimeRemainUtil(qdTask, client);
         this.codePredictUtil = new CodePredictUtil(qdTask, client);
-        this.submitUtil = new SubmitUtil(qdTask, client);
+        this.submitUtil = SubmitUtil.getInstance(executor);
     }
 
     @Override
@@ -48,6 +47,7 @@ public class QdRunnable implements Runnable {
                 LockSupport.park(this);
                 expect = timeRemainUtil.getExpectTime();
             } else {
+                submitUtil.setExpectSubmitTime(expect);
                 List<Thread> threads = new ArrayList<>(waitingThreads);
                 waitingThreads.clear();
                 for (Thread t : threads) {
@@ -63,24 +63,13 @@ public class QdRunnable implements Runnable {
             if (timeRemain > 30000) {
                 sleep(timeRemain - 30000);
             }
-            Map<String, String> codes = getCodes();
 
             /*
-             * 如果剩余时间 < 1s，开始提交
+             *  获取验证码之后直接提交
              */
-
-            timeRemain = expect - System.currentTimeMillis();
-            if (timeRemain > 2000) {
-                sleep(timeRemain - 2000);
-            }
-            int cookieCount = codes.size();
-            long span = 2000 / cookieCount;
-            if (span <= 0 || span > 1000) {
-                span = 100;
-            }
+            Map<String, String> codes = getCodes();
             for (Map.Entry<String, String> entry : codes.entrySet()) {
-                submit(entry.getValue(), entry.getKey());
-                sleep(span);
+                submit(entry.getValue(), entry.getKey(), qdTask, client);
             }
         } catch (Exception e) {
             logger.error("run error, {}", e.getMessage(), e);
@@ -118,14 +107,8 @@ public class QdRunnable implements Runnable {
         return codes;
     }
 
-    private void submit(String code, String cookie) {
-        executor.execute(() -> {
-            try {
-                submitUtil.submit(code, cookie);
-            } catch (Throwable e) {
-                logger.error(e.getMessage(), e);
-            }
-        });
+    private void submit(String code, String cookie, QdTask qdTask, HttpClient client) {
+        submitUtil.submit(code, cookie, qdTask, client);
     }
 
     private static void sleep(long timeMillis) {

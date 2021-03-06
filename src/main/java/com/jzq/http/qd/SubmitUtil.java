@@ -1,5 +1,4 @@
 package com.jzq.http.qd;
-
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import org.apache.http.HttpEntity;
@@ -18,21 +17,58 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.concurrent.*;
 
 public class SubmitUtil {
     public static final Logger logger = LoggerFactory.getLogger(SubmitUtil.class);
 
-    private final QdTask qdTask;
-    private final HttpClient client;
+    private Executor executor;
+    private final ScheduledThreadPoolExecutor scheduledThreadPoolExecutor = new ScheduledThreadPoolExecutor(1);
+    private final BlockingQueue<Task> tasks = new ArrayBlockingQueue<>(1000);
 
-    public SubmitUtil(QdTask qdTask, HttpClient client) {
-        this.qdTask = qdTask;
-        this.client = client;
+    private final long minSubmitSpan = 80;
+
+    private static final SubmitUtil UTIL = new SubmitUtil();
+
+    public static SubmitUtil getInstance(Executor executor) {
+        UTIL.executor = executor;
+        return UTIL;
     }
 
-    public void submit(String code, String cookie) throws IOException {
+    public void setExpectSubmitTime(long expectSubmitTime) {
+        // 提前3秒开始提交任务
+        long remain = expectSubmitTime - System.currentTimeMillis() - 3000;
+        if (remain < 0) {
+            remain = 0;
+        }
+        Runnable runnable = () -> {
+            while (true) {
+                try {
+                    Task t = tasks.poll(30, TimeUnit.SECONDS);
+                    if (t == null) {
+                        break;
+                    } else {
+                        executor.execute(() -> {
+                            try {
+                                submitInternal(t.code, t.cookie, t.qdTask, t.client);
+                            } catch (Throwable e) {
+                                logger.error(e.getMessage(), e);
+                            }
+                        });
+                    }
+                    Thread.sleep(minSubmitSpan);
+                } catch (Throwable t) {
+                    logger.error(t.getMessage(), t);
+                }
+            }
+        };
+
+        scheduledThreadPoolExecutor.schedule(runnable, remain, TimeUnit.MILLISECONDS);
+    }
+
+    private void submitInternal(String code, String cookie, QdTask qdTask, HttpClient client) throws IOException {
         logger.info("start to submit, id: {}", qdTask.getId());
-        HttpPost saveMethod = createSaveMethod(code, cookie);
+        HttpPost saveMethod = createSaveMethod(code, cookie, qdTask);
         HttpResponse response = client.execute(saveMethod);
         String content = EntityUtils.toString(response.getEntity());
         JSONObject object = JSON.parseObject(content);
@@ -61,7 +97,15 @@ public class SubmitUtil {
         logger.info("submit success: {}, id: {}", qdTask.getStatus(), qdTask.getId());
     }
 
-    private HttpPost createSaveMethod(String code, String cookie) {
+    public void submit(String code, String cookie, QdTask qdTask, HttpClient client) {
+        try {
+            tasks.offer(new Task(code, cookie, qdTask, client), 1, TimeUnit.SECONDS);
+        } catch (Throwable t) {
+            logger.error(t.getMessage(), t);
+        }
+    }
+
+    private HttpPost createSaveMethod(String code, String cookie, QdTask qdTask) {
         HttpPost httpPost = new HttpPost("https://www.sh.msa.gov.cn/zwzx/applyVtsDeclare1/save/");
         RequestConfig requestConfig = RequestConfig.custom()
                 .setSocketTimeout(30000)
@@ -71,11 +115,11 @@ public class SubmitUtil {
         httpPost.setHeader("Cookie", cookie);
         String boundary = "----WebKitFormBoundaryinIIzQYX8Ulb5B4z";
         httpPost.setHeader("Content-Type","multipart/form-data; boundary="+boundary);
-        httpPost.setEntity(getSaveEntity2(code, boundary));
+        httpPost.setEntity(getSaveEntity2(code, boundary, qdTask));
         return httpPost;
     }
 
-    private HttpEntity getSaveEntity2(String code, String boundary) {
+    private HttpEntity getSaveEntity2(String code, String boundary, QdTask qdTask) {
         MultipartEntityBuilder entityBuilder = MultipartEntityBuilder.create();
         ContentType contentType = ContentType.create("text/plain", StandardCharsets.UTF_8);
         TaskParam param = qdTask.getParam();
@@ -171,5 +215,19 @@ public class SubmitUtil {
     private static String encode64(String original) {
         Base64.Encoder encoder = Base64.getEncoder();
         return encoder.encodeToString(original.getBytes());
+    }
+
+    private static class Task {
+        String code;
+        String cookie;
+        QdTask qdTask;
+        HttpClient client;
+
+        public Task(String code, String cookie, QdTask qdTask, HttpClient client) {
+            this.code = code;
+            this.cookie = cookie;
+            this.qdTask = qdTask;
+            this.client = client;
+        }
     }
 }

@@ -35,19 +35,22 @@ public class TimeRemainUtil {
         String today = new SimpleDateFormat("yyyyMMdd").format(new Date());
         if (predictDate == null || !predictDate.equals(today)) {
             logger.info("predict expect time");
-            long expect = Long.MAX_VALUE;
+            long expect = TimeRemainUtil.expect = Long.MAX_VALUE;
             for  (String cookie : qdTask.getConfig().getCookie()) {
                 try {
                     long start = System.currentTimeMillis();
                     long time = timeRemainInternal(cookie);
                     long end = System.currentTimeMillis();
-                    if (time < 0) {
-                        expect = System.currentTimeMillis() - 1000;
-                    } else {
-                        expect = (start + end) / 2 + time * 1000;
+                    if (time != Long.MAX_VALUE) {
+                        if (time < 0) {
+                            // time < 0 表示已经可以提交，expect返回当前时间前一秒
+                            expect = System.currentTimeMillis() - 1000;
+                        } else {
+                            expect = (start + end) / 2 + time * 1000;
+                        }
+                        TimeRemainUtil.expect = expect;
+                        TimeRemainUtil.predictDate = today;
                     }
-                    TimeRemainUtil.expect = expect;
-                    TimeRemainUtil.predictDate = today;
                 } catch (Throwable ignore) {
                 }
                 if (expect != Long.MAX_VALUE) {
@@ -57,6 +60,7 @@ public class TimeRemainUtil {
         } else {
             logger.info("time predicted");
         }
+        logger.info("getExpectTime return: {}", expect);
         return expect;
     }
 
@@ -68,17 +72,15 @@ public class TimeRemainUtil {
         HttpResponse execute = client.execute(getTimeMethod);
         String time = EntityUtils.toString(execute.getEntity());
         long end = System.currentTimeMillis();
-        long result = Long.MAX_VALUE;
         try {
-            result = Long.parseLong(time);
-        } catch (Throwable ignore) {
-        }
-        if (result == Long.MAX_VALUE) {
-            throw new RuntimeException("parse time error");
-        } else {
+            long result = Long.parseLong(time);
             logger.info("get remain time finished, result: {}, time used: {}, id: {}", result, (end - start), qdTask.getId());
             return result;
+        } catch (Throwable ignore) {
         }
+
+        logger.error("parse time error");
+        return Long.MAX_VALUE;
     }
 
     private HttpGet createGetTimeMethod(String cookie) {
