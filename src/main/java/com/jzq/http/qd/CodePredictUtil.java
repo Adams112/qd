@@ -3,7 +3,6 @@ package com.jzq.http.qd;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import org.apache.http.HttpResponse;
-import org.apache.http.client.HttpClient;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
@@ -26,12 +25,7 @@ public class CodePredictUtil {
     private final String tempFilePrefix = "/root/temp/pics/"
             + new SimpleDateFormat("yyyyMMdd").format(new Date()) + "/";
 
-    private final QdTask qdTask;
-    private final HttpClient client;
-
-    public CodePredictUtil(QdTask qdTask, HttpClient client) {
-        this.qdTask = qdTask;
-        this.client = client;
+    public CodePredictUtil() {
         if (!new File(tempFilePrefix).exists()) {
             boolean mkdirs = new File(tempFilePrefix).mkdirs();
             if (!mkdirs) {
@@ -40,12 +34,12 @@ public class CodePredictUtil {
         }
     }
 
-    public String getCode(String cookie) {
+    public String getCode(QdTask qdTask, String cookie) {
         String image = null;
         int n = 3;
         while (n-- > 0 && image == null) {
             try {
-                image = getImage(cookie);
+                image = getImage(qdTask, cookie);
             } catch (Throwable ignore) {
                 try {
                     Thread.sleep(50);
@@ -62,12 +56,11 @@ public class CodePredictUtil {
         n = 3;
         while (n-- > 0 && code == null) {
             try {
-                code = getValidationCode(image);
+                code = getValidationCode(qdTask, image);
             } catch (Throwable ignore) {
                 try {
                     Thread.sleep(50);
-                } catch (Throwable e) {
-                    logger.error(e.getMessage(), e);
+                } catch (Throwable ignore2) {
                 }
             }
         }
@@ -78,37 +71,52 @@ public class CodePredictUtil {
         return code;
     }
 
-    private String getImage(String cookie) throws IOException {
+    private String getImage(QdTask qdTask, String cookie) throws IOException {
+        long start = System.currentTimeMillis();
         String tempFileName = tempFilePrefix + picIndex.getAndIncrement() + ".jpg";
-        logger.info("start to getImage, fileName: {}, id: {}", tempFileName, qdTask.getId());
-        HttpGet getImageMethod = createGetImageMethod(cookie);
-        HttpResponse response = client.execute(getImageMethod);
-        byte[] bytes = EntityUtils.toByteArray(response.getEntity());
-        FileOutputStream outputStream = new FileOutputStream(tempFileName);
-        outputStream.write(bytes);
-        outputStream.flush();
-        outputStream.close();
-        logger.info("getImage success, fileName: {}, id: {}", tempFileName, qdTask.getId());
-        return tempFileName;
+        try {
+            HttpGet getImageMethod = createGetImageMethod(cookie);
+            HttpResponse response = GlobalHttpClient.client.execute(getImageMethod);
+            byte[] bytes = EntityUtils.toByteArray(response.getEntity());
+            FileOutputStream outputStream = new FileOutputStream(tempFileName);
+            outputStream.write(bytes);
+            outputStream.flush();
+            outputStream.close();
+            logger.info("getImage success, fileName: {}, id: {}, timeUse: {}ms",
+                    tempFileName, qdTask.getId(), (System.currentTimeMillis() - start));
+            return tempFileName;
+        } catch (Throwable t) {
+            logger.info("getImage failed, fileName: {}, id: {}, timeUse: {}, message: {}ms",
+                    tempFileName, qdTask.getId(), (System.currentTimeMillis() - start), t.getMessage());
+            throw t;
+        }
     }
 
-    private String getValidationCode(String tempFileName) throws IOException {
-        logger.info("start to recognize pic {}, id: {}", tempFileName, qdTask.getId());
-        HttpPost getValidationCodeMethod = createGetValidationCodeMethod(tempFileName);
-        HttpResponse response = client.execute(getValidationCodeMethod);
-        String content = EntityUtils.toString(response.getEntity());
-        String result = JSON.parseObject(content).getString("result");
+    private String getValidationCode(QdTask qdTask, String tempFileName) throws IOException {
+        long start = System.currentTimeMillis();
+        try {
+            HttpPost getValidationCodeMethod = createGetValidationCodeMethod(tempFileName);
+            HttpResponse response = GlobalHttpClient.client.execute(getValidationCodeMethod);
+            String content = EntityUtils.toString(response.getEntity());
+            String result = JSON.parseObject(content).getString("result");
 
-        File f = new File(tempFileName);
-        int n = 1;
-        File newFile = new File(tempFilePrefix + "result-" + result + ".jpg");
-        while (newFile.exists()) {
-            newFile = new File(tempFilePrefix + "result-" + result + "-" + n + ".jpg");
-            n++;
+            File f = new File(tempFileName);
+            int n = 1;
+            File newFile = new File(tempFilePrefix + "result-" + result + ".jpg");
+            while (newFile.exists()) {
+                newFile = new File(tempFilePrefix + "result-" + result + "-" + n + ".jpg");
+                n++;
+            }
+            f.renameTo(newFile);
+            logger.info("recognize pic {} finished, result: {}, id: {}, timeUse: {}ms",
+                    tempFileName, result, qdTask.getId(), (System.currentTimeMillis() - start));
+            return result;
+        } catch (Throwable t) {
+            logger.info("recognize pic {} finished, message: {}, id: {}, timeUse: {}ms",
+                    tempFileName, t.getMessage(), qdTask.getId(), (System.currentTimeMillis() - start));
+            throw t;
         }
-        f.renameTo(newFile);
-        logger.info("recognize pic {} finished, result: {}, id: {}", tempFileName, result, qdTask.getId());
-        return result;
+
     }
 
 

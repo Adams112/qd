@@ -16,93 +16,107 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.Base64;
+import java.text.SimpleDateFormat;
+import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class SubmitUtil {
     public static final Logger logger = LoggerFactory.getLogger(SubmitUtil.class);
+    private static final HttpClient client = GlobalHttpClient.client;
+    private final CodePredictUtil codePredictUtil = new CodePredictUtil();
 
-    private Executor executor;
-    private final ScheduledThreadPoolExecutor scheduledThreadPoolExecutor = new ScheduledThreadPoolExecutor(1);
-    private final BlockingQueue<Task> tasks = new ArrayBlockingQueue<>(1000);
+    private final ThreadPoolExecutor executor = new ThreadPoolExecutor(20, 20,
+            100L, TimeUnit.SECONDS, new ArrayBlockingQueue<>(100));
 
-    private final long minSubmitSpan = 80;
+    private final AtomicBoolean submitStatus = new AtomicBoolean();
 
-    private static final SubmitUtil UTIL = new SubmitUtil();
 
-    public static SubmitUtil getInstance(Executor executor) {
-        UTIL.executor = executor;
-        return UTIL;
+
+    public String start(List<QdTask> tasks) {
+        boolean updated = submitStatus.compareAndSet(false, true);
+        logger.info("任务启动: {}", updated);
+        if (updated) {
+            executor.execute(() -> {
+                logger.info("submit thread started");
+                submit(tasks);
+                logger.info("submit thread exit");
+            });
+        }
+        return updated ? "提交任务启动成功，开始提交" : "提交任务运行中";
     }
 
-    public void setExpectSubmitTime(long expectSubmitTime) {
-        // 提前3秒开始提交任务
-        long remain = expectSubmitTime - System.currentTimeMillis() - 3000;
-        if (remain < 0) {
-            remain = 0;
-        }
-        Runnable runnable = () -> {
-            while (true) {
-                try {
-                    Task t = tasks.poll(30, TimeUnit.SECONDS);
-                    if (t == null) {
-                        break;
-                    } else {
-                        executor.execute(() -> {
-                            try {
-                                submitInternal(t.code, t.cookie, t.qdTask, t.client);
-                            } catch (Throwable e) {
-                                logger.error(e.getMessage(), e);
-                            }
-                        });
+    public String stop() {
+        boolean updated = submitStatus.compareAndSet(true, false);
+        logger.info("任务停止: {}", updated);
+        return updated
+                ? "提交任务停止成功"
+                : "提交任务已停止或未启动";
+    }
+
+    private void submit(List<QdTask> tasks) {
+        while (submitStatus.get()) {
+            for (QdTask qdTask : tasks) {
+                if (!submitStatus.get()) {
+                    return;
+                }
+                if (qdTask.getStatus() != QdStatusEnum.NEW) {
+                    continue;
+                }
+
+                for (String cookie : qdTask.getConfig().getCookie()) {
+                    if (!submitStatus.get()) {
+                        return;
                     }
-                    Thread.sleep(minSubmitSpan);
-                } catch (Throwable t) {
-                    logger.error(t.getMessage(), t);
+                    if (qdTask.getStatus() != QdStatusEnum.NEW) {
+                        continue;
+                    }
+
+                    try {
+                        String code = codePredictUtil.getCode(qdTask, cookie);
+                        submitInternal(code, cookie, qdTask);
+                    } catch (Throwable t) {
+                        logger.error("submit task {} error", qdTask.getId(), t);
+                    }
                 }
             }
-        };
-
-        scheduledThreadPoolExecutor.schedule(runnable, remain, TimeUnit.MILLISECONDS);
+        }
     }
 
-    private void submitInternal(String code, String cookie, QdTask qdTask, HttpClient client) throws IOException {
-        logger.info("start to submit, id: {}", qdTask.getId());
-        HttpPost saveMethod = createSaveMethod(code, cookie, qdTask);
-        HttpResponse response = client.execute(saveMethod);
-        String content = EntityUtils.toString(response.getEntity());
+    private void submitInternal(String code, String cookie, QdTask qdTask) throws IOException {
+        String content;
+        try {
+            HttpPost saveMethod = createSaveMethod(code, cookie, qdTask);
+            HttpResponse response = client.execute(saveMethod);
+            content = EntityUtils.toString(response.getEntity());
+            logger.info("submit result: {}", content);
+        } catch (Throwable t) {
+            logger.info("submit failed, " + t.getMessage());
+            throw t;
+        }
+
         JSONObject object = JSON.parseObject(content);
-        logger.info("submit result: {}", content);
+        HashMap<String, Object> submitResult = new HashMap<>();
+        SimpleDateFormat format = new SimpleDateFormat("yyyyMMdd hh:mm:ss.SSS");
+        submitResult.put("submitTime", format.format(new Date()));
+        submitResult.put("submitResult", content);
+        submitResult.put("cookie", cookie);
+        qdTask.getResults().add(submitResult);
 
         if (qdTask.getStatus() != QdStatusEnum.SUCCESS) {
-            qdTask.setResult(content);
             String result = object.getString("resultDesc");
-            if ("验证码错误！".equals(result)) {
-                // retry
-            } else if ("当前时间点已被申报，是否选择排队？".equals(result)) {
-                qdTask.setStatus(QdStatusEnum.FAILED);
-            } else if ("当前船舶已经申报成功,请勿重新提交！".equals(result)) {
-                qdTask.setStatus(QdStatusEnum.FAILED);
-            } else if ("申报参数填写错误，请仔细核查申报信息。".equals(result)) {
-                qdTask.setStatus(QdStatusEnum.FAILED);
-            } else if ("请在申报时间内进行申报".equals(result)) {
-                // retry
-            } else if ("操作成功".equals(result)) {
+            if ("操作成功".equals(result)) {
                 qdTask.setStatus(QdStatusEnum.SUCCESS);
-            } else {
-                qdTask.setStatus(QdStatusEnum.FAILED);
+            } else if ("当前时间点已被申报，是否选择排队？".equals(result)
+                    || "申报参数填写错误，请仔细核查申报信息。".equals(result)
+                    || "当前船舶已经申报成功,请勿重新提交！".equals(result)) {
+                if (qdTask.getStatus() != QdStatusEnum.SUCCESS) {
+                    qdTask.setStatus(QdStatusEnum.FAILED);
+                }
             }
         }
 
         logger.info("submit success: {}, id: {}", qdTask.getStatus(), qdTask.getId());
-    }
-
-    public void submit(String code, String cookie, QdTask qdTask, HttpClient client) {
-        try {
-            tasks.offer(new Task(code, cookie, qdTask, client), 1, TimeUnit.SECONDS);
-        } catch (Throwable t) {
-            logger.error(t.getMessage(), t);
-        }
     }
 
     private HttpPost createSaveMethod(String code, String cookie, QdTask qdTask) {

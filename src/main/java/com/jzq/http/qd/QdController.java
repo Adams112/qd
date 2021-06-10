@@ -10,13 +10,7 @@ import org.springframework.web.bind.annotation.ResponseBody;
 
 import javax.servlet.http.HttpServletRequest;
 import java.io.IOException;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Controller
@@ -24,32 +18,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class QdController {
     private static final Logger logger = LoggerFactory.getLogger(QdController.class);
 
-    private Set<QdTask> tasks = new HashSet<>(100);
-
-    private ThreadPoolExecutor executor = new ThreadPoolExecutor(20, 20, 100L
-            , TimeUnit.SECONDS, new ArrayBlockingQueue<Runnable>(100));
-    private final ScheduledThreadPoolExecutor scheduledThreadPoolExecutor = new ScheduledThreadPoolExecutor(1);
-    private AtomicInteger index = new AtomicInteger(1);
-
-    public QdController() {
-        Runnable runnable = () -> {
-            Iterator<QdTask> iterator = tasks.iterator();
-            Calendar cal = Calendar.getInstance();
-            cal.setTimeInMillis(System.currentTimeMillis());
-            cal.add(Calendar.DAY_OF_MONTH, -7);
-
-            while (iterator.hasNext()) {
-                QdTask task = iterator.next();
-                Calendar cal2 = Calendar.getInstance();
-                cal2.setTimeInMillis(task.getGmtCreate().getTime());
-                if (cal2.before(cal)) {
-                    logger.info("remove task {}", task.getId());
-                    iterator.remove();
-                }
-            }
-        };
-        scheduledThreadPoolExecutor.scheduleAtFixedRate(runnable, 12L, 24L, TimeUnit.HOURS);
-    }
+    private final List<QdTask> allTasks = new ArrayList<>(1000);
+    private  final List<QdTask> tasks = new ArrayList<>(100);
+    private final AtomicInteger index = new AtomicInteger(1);
+    private final SubmitUtil submitUtil = new SubmitUtil();
 
     @RequestMapping("/addTask")
     @ResponseBody
@@ -73,7 +45,7 @@ public class QdController {
         task.setGmtCreate(new Date());
         task.setStatus(QdStatusEnum.NEW);
         tasks.add(task);
-        executor.execute(new QdRunnable(task, executor));
+        allTasks.add(task);
         return id;
     }
 
@@ -93,10 +65,24 @@ public class QdController {
         return removed;
     }
 
+    @ResponseBody
+    @RequestMapping("/start")
+    public Object start() {
+        return submitUtil.start(tasks);
+    }
+
+    @ResponseBody
+    @RequestMapping("/stop")
+    public Object stop() {
+        String message = submitUtil.stop();
+        tasks.clear();
+        return message;
+    }
+
     @RequestMapping("/getTask")
     @ResponseBody
     public Object getTask() {
-        List<QdTask> result = new ArrayList<>(tasks);
+        List<QdTask> result = new ArrayList<>(allTasks);
         result.sort((o1, o2) -> o2.getId() - o1.getId());
         return result;
     }
@@ -152,16 +138,5 @@ public class QdController {
         } else {
             return defaultValue;
         }
-    }
-
-    public static void main(String[] args) throws ParseException {
-        Calendar instance = Calendar.getInstance();
-        instance.setTimeInMillis(System.currentTimeMillis());
-        SimpleDateFormat format = new SimpleDateFormat("yyyyMMdd");
-        Date parse = format.parse("20210131");
-        Calendar ins2 = Calendar.getInstance();
-        ins2.setTimeInMillis(parse.getTime());
-        instance.add(Calendar.DAY_OF_MONTH, -7);
-        System.out.println(instance.before(ins2));
     }
 }

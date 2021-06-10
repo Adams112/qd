@@ -3,7 +3,7 @@ package com.jzq.http.qd;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 
-import java.util.Date;
+import java.util.*;
 
 public class QdTask {
     private Integer id;
@@ -21,6 +21,8 @@ public class QdTask {
     private QdStatusEnum status;
 
     private String result;
+
+    private List<HashMap<String, Object>> results = new ArrayList<>();
 
     private String message;
 
@@ -107,5 +109,13 @@ public class QdTask {
 
     public void setThread(Thread thread) {
         this.thread = thread;
+    }
+
+    public List<HashMap<String, Object>> getResults() {
+        return results;
+    }
+
+    public void setResults(List<HashMap<String, Object>> results) {
+        this.results = results;
     }
 }
